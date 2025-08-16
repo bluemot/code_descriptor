@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Code Upload & Chat</title>
+</head>
+<body>
+    <h1>Upload / Run Code Directory</h1>
+    <div>
+      <label><input type="radio" name="mode" value="dir" checked> Use existing server directory</label>
+      <label><input type="radio" name="mode" value="upload"> Upload local files</label>
+    </div>
+    <div id="dirSection">
+      <label>Project directory: <input type="text" id="projectDirInput" placeholder="/path/to/project"></label>
+    </div>
+    <div id="uploadSection" style="display:none; margin-top:8px;">
+      <input type="file" id="fileInput" webkitdirectory multiple>
+      <button id="uploadBtn">Upload</button>
+    </div>
+    <button id="runBtn" style="margin-top:8px;">Run</button>
+    <hr>
+    <h1>Chat</h1>
+    <input type="text" id="questionInput" placeholder="Ask a question"> <button id="askBtn">Ask</button>
+    <pre id="chatOutput"></pre>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

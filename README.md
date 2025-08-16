@@ -1,0 +1,55 @@
+# FastAPI RAG Demo
+
+This project provides a FastAPI backend and a simple frontend to demonstrate uploading code files,
+generating ASTs, indexing via Qdrant, and answering questions via a Retrieval-Augmented Generation (RAG) workflow.
+
+## Prerequisites
+
+- Docker (for Qdrant)
+- [Ollama](https://ollama.com/) (for local LLM inference)
+- Python 3.8+
+
+## Setup
+
+1. **Install Python dependencies**
+   ```bash
+   pip install fastapi uvicorn python-multipart
+   ```
+
+2. **Run Qdrant via Docker**
+   ```bash
+   docker run -d -p 6333:6333 qdrant/qdrant
+   ```
+
+3. **建立範例設定檔**
+   ```bash
+   cp env.txt.example env.txt
+   # 編輯 env.txt，填入您的 Qdrant、Embedding、OLLAMA 或 LLM 參數
+   ```
+4. **Pull Ollama models**
+   ```bash
+   ollama pull BGE-M3
+   ollama pull deepseek-coder:6.7b
+   ```
+
+## Running the Server
+
+```bash
+uvicorn backend.main:app --reload --port 8000
+```
+
+## Frontend
+
+Open `frontend/index.html` in your browser. Use the interface to upload a code directory and ask questions.
+
+## API Endpoints
+
+- `POST /upload`: Upload multiple files (form field `files`) to generate AST and build the index.
+- `POST /ask`: Send JSON `{ "question": "..." }` to retrieve an answer. Supports markdown and mermaid in the response.
+
+## Testing
+
+Run pytest to verify the basic endpoints:
+```bash
+pytest -q
+```
