@@ -40,7 +40,6 @@ LLM_MODEL = os.getenv("LLM_MODEL", None)
 # ──────────────────── 全域設定 ────────────────────────────
 EMBED_MODEL = os.getenv("EMBED_MODEL", "BAAI/bge-large-zh-v1.5")
 EMBEDDER    = SentenceTransformer(EMBED_MODEL, device="cuda" if torch.cuda.is_available() else "cpu")
-COLL        = "proj_ast"
 
 # LLM (OpenAI 介面)
 def get_llm():
@@ -71,6 +70,19 @@ def get_llm():
 LLM_SUM = get_llm()
 
 warnings.filterwarnings("ignore", category=DeprecationWarning, message="`search` method")
+
+def get_coll_name(ast_dir: str) -> str:
+    """
+    Determine Qdrant collection name based on the AST directory or file name.
+    Returns 'proj_ast_<name>' where <name> is the basename of ast_dir without AST-related suffixes.
+    """
+    base = pathlib.Path(ast_dir).name
+    # strip common AST filename suffixes
+    for suf in (".ast.json.gz", ".ast.json.zst", ".ast.json"):
+        if base.endswith(suf):
+            base = base[: -len(suf)]
+            break
+    return f"proj_ast_{base}"
 
 # ──────────────────── AST 解析 ─────────────────────────────
 
@@ -113,7 +125,7 @@ def summarize(texts: List[str]) -> str:
 
 # ──────────────────── 建索引 ─────────────────────────────
 
-def build_index(qc_cli: qc.QdrantClient, ast_dir: str):
+def build_index(qc_cli: qc.QdrantClient, ast_dir: str, coll_name: str):
     ast_root = pathlib.Path(ast_dir)
     # The glob will find *.ast.json, *.ast.json.gz, etc.
     ast_files = [ast_root] if ast_root.is_file() else sorted(ast_root.rglob("*.ast.json*"))
@@ -265,12 +277,14 @@ def build_index(qc_cli: qc.QdrantClient, ast_dir: str):
     if vecs.shape[1] != vector_size: # Should not happen with bge-large-zh-v1.5 (1024)
         print(f"[warn] Vector dimension mismatch. Expected {vector_size}, got {vecs.shape[1]}. Will use {vecs.shape[1]}.")
 
-    if qc_cli.collection_exists(COLL):
-        print(f"[info] Collection '{COLL}' exists, deleting and recreating.")
-        qc_cli.delete_collection(COLL)
-    
-    qc_cli.create_collection(COLL, vectors_config=qm.VectorParams(size=int(vecs.shape[1]),
-                                                                  distance=qm.Distance.COSINE))
+    # Create collection if it does not exist; otherwise upsert into existing collection
+    if not qc_cli.collection_exists(coll_name):
+        qc_cli.create_collection(
+            coll_name,
+            vectors_config=qm.VectorParams(size=int(vecs.shape[1]), distance=qm.Distance.COSINE),
+        )
+    else:
+        print(f"[info] Collection '{coll_name}' exists, upserting new vectors.")
     
     # Generate integer IDs for Qdrant if not using UUIDs or specific string IDs
     # Qdrant SDK can take integer IDs directly.
@@ -282,23 +296,25 @@ def build_index(qc_cli: qc.QdrantClient, ast_dir: str):
     payloads = [{"text": d["text"], "original_id": d["id"]} for d in docs]
 
 
-    qc_cli.upload_collection(COLL, 
-                             vectors=vecs,
-                             payload=payloads,
-                             ids=qdrant_ids,
-                             batch_size=256) # Added batch_size for potentially large uploads
+    qc_cli.upload_collection(
+        coll_name,
+        vectors=vecs,
+        payload=payloads,
+        ids=qdrant_ids,
+        batch_size=256,
+    )
     print(f"[build] 完成，共 {len(docs)} 向量")
 
 # ──────────────────── 檢索 ───────────────────────────────
 
-def search(client: qc.QdrantClient, q: str, k: int = 40) -> List[str]:
+def search(client: qc.QdrantClient, coll_name: str, q: str, k: int = 40) -> List[str]:
     q_vec = EMBEDDER.encode(q, convert_to_numpy=True)
     # Ensure q_vec is 1D for Qdrant client if it's not already
     query_vector = q_vec.tolist()
     if isinstance(query_vector[0], list): # if encode returns a list of lists for single query
         query_vector = query_vector[0]
 
-    hits = client.search(collection_name=COLL, query_vector=query_vector, limit=k, with_payload=True)
+    hits = client.search(collection_name=coll_name, query_vector=query_vector, limit=k, with_payload=True)
     if not hits:
         return []
     
@@ -341,12 +357,12 @@ def search(client: qc.QdrantClient, q: str, k: int = 40) -> List[str]:
     return [texts[i] for i in order]
 
 
-def answer(client: qc.QdrantClient, question: str) -> str:
+def answer(client: qc.QdrantClient, coll_name: str, question: str) -> str:
     """
     Perform RAG-based answer generation for the question using the Qdrant client.
     Returns the generated answer text.
     """
-    ctx = search(client, question)
+    ctx = search(client, coll_name, question)
     if not ctx:
         return "(no context)"
     prompt = (
@@ -388,21 +404,20 @@ def main():
 
 
     if args.build:
-        build_index(qc_cli, args.build)
+        coll_name = get_coll_name(args.build)
+        build_index(qc_cli, args.build, coll_name)
 
     if args.ask:
+        if not args.build:
+            sys.exit("✗ 要使用 --ask 請同時提供 --build <ast_dir> 以決定 collection 名稱")
+        coll_name = get_coll_name(args.build)
         try:
-            collection_info = qc_cli.get_collection(COLL)
-            print(f"[info] Found collection '{COLL}' with {collection_info.points_count} points.")
-        except Exception: 
-            print(f"[info] Collection '{COLL}' does not exist.")
-            if not args.build:
-                 sys.exit(f"✗ Collection '{COLL}' not found. Please run with --build <ast_dir> first.")
-            # If --build was also specified, build_index would have run already or will run.
-            # If collection still not found after build (if build was specified and ran), then it's an issue.
-            # For simplicity, if --ask is used and collection is missing, error out if --build wasn't *also* given.
-
-        answer(qc_cli, args.ask)
+            info = qc_cli.get_collection(coll_name)
+            print(f"[info] Found collection '{coll_name}' with {info.points_count} points.")
+        except Exception:
+            sys.exit(f"✗ Collection '{coll_name}' not found. Please run with --build <ast_dir> first.")
+        ans = answer(qc_cli, coll_name, args.ask)
+        print(ans)
 
 if __name__ == "__main__":
     main()

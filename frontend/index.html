@@ -6,7 +6,10 @@
     <title>Code Upload & Chat</title>
 </head>
 <body>
-    <h1>Upload / Run Code Directory</h1>
+    <h1>Upload / Build AST / Build RAG</h1>
+    <div>
+      <label>Project Name: <input type="text" id="projectNameInput" placeholder="project name"></label>
+    </div>
     <div>
       <label><input type="radio" name="mode" value="dir" checked> Use existing server directory</label>
       <label><input type="radio" name="mode" value="upload"> Upload local files</label>
@@ -18,9 +21,18 @@
       <input type="file" id="fileInput" webkitdirectory multiple>
       <button id="uploadBtn">Upload</button>
     </div>
-    <button id="runBtn" style="margin-top:8px;">Run</button>
+    <button id="runBtn" style="margin-top:8px;">Build AST</button>
+    <button id="buildRagBtn" style="margin-top:8px; margin-left:8px;">Build RAG</button>
+    <div id="progressContainer" style="display:none; margin-top:8px;">
+      <progress id="progressBar" value="0" max="100" style="width:100%;"></progress>
+      <div id="progressText"></div>
+      <pre id="debugOutput" style="background:#f0f0f0; padding:8px; height:150px; overflow:auto; margin-top:4px;"></pre>
+    </div>
     <hr>
     <h1>Chat</h1>
+    <div>
+      <label>Project Name: <input type="text" id="chatProjectInput" placeholder="project name"></label>
+    </div>
     <input type="text" id="questionInput" placeholder="Ask a question"> <button id="askBtn">Ask</button>
     <pre id="chatOutput"></pre>
 

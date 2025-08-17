@@ -13,12 +13,20 @@ from pathlib import Path
 from .ast_gen import run_ast_generation
 from .rag_service import build_index, answer_question
 
+# Include build_rag and ask_rag routers
+from .build_rag import router as build_rag_router
+from .ask_rag import router as ask_rag_router
+from .build_ast import router as build_ast_router
+
 
 app = FastAPI()
 
 # Serve frontend static files and index
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
+import threading
+import queue
+import json
 
 # Mount the frontend directory for static assets
 app.mount("/static", StaticFiles(directory="frontend"), name="static")
@@ -62,7 +70,7 @@ async def upload(request: Request):
         # Return the server-side project_dir for subsequent Run
         return {"status": "success", "project_dir": project_dir}
 
-    # Handle Run action via JSON project_dir
+    # Handle Run action via JSON project_dir with streaming progress
     if content_type.startswith('application/json'):
         data = await request.json()
         project_dir = data.get('project_dir')
@@ -71,12 +79,29 @@ async def upload(request: Request):
         p = Path(project_dir)
         if not p.exists() or not p.is_dir():
             return {"status": "error", "detail": "Invalid project directory"}
-        try:
-            ast_dir = run_ast_generation(p)
-            build_index(ast_dir)
-        except Exception as e:
-            return {"status": "error", "detail": str(e)}
-        return {"status": "success"}
+
+        def event_stream():
+            q = queue.Queue()
+
+            def worker():
+                # Generate ASTs, streaming subprocess output
+                ast_dir = run_ast_generation(p, on_line=q.put)
+                try:
+                    build_index(ast_dir)
+                except Exception as e:
+                    q.put(f"__INDEX_ERROR__:{e}")
+                # Signal completion
+                q.put(None)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+            while True:
+                item = q.get()
+                if item is None:
+                    break
+                yield item
+
+        return StreamingResponse(event_stream(), media_type="text/plain")
 
     return {"status": "error", "detail": "Unsupported content type"}
 
@@ -91,3 +116,8 @@ async def ask(q: Question):
     except Exception as e:
         return {"status": "error", "detail": str(e)}
     return {"answer": ans}
+
+# RAG build and ask endpoints
+app.include_router(build_rag_router)
+app.include_router(ask_rag_router)
+app.include_router(build_ast_router)
