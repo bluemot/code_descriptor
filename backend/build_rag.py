@@ -1,7 +1,13 @@
 from fastapi import APIRouter
 from pydantic import BaseModel
+from fastapi.responses import StreamingResponse
+import threading
+import queue
 import os
+import io
+import contextlib
 import qdrant_client as qc
+from qdrant_client.http.models import CollectionStatus
 from pathlib import Path
 
 from .rag_demo6_1 import get_coll_name, build_index as rd_build_index
@@ -17,31 +23,93 @@ class BuildRequest(BaseModel):
 
 @router.post("/build_rag")
 async def build_rag(req: BuildRequest):
-    coll = get_coll_name(req.project)
-    url = os.getenv("QDRANT_URL", None)
-    key = os.getenv("QDRANT_KEY", None) or None
-    if url:
-        client = qc.QdrantClient(url=url, api_key=key)
-    else:
-        client = qc.QdrantClient(path="rag_demo_qdrant")
+    """
+    Build RAG index, stream progress logs to client, and send final JSON status.
+    """
+    q: queue.Queue[str] = queue.Queue()
 
-    # 確認 AST 輸出已在 project_dir/ast_out
-    ast_out = Path(req.project_dir) / 'ast_out'
-    if not ast_out.exists() or not any(ast_out.iterdir()):
-        return {"status": "error", "message": "AST output not found, please build AST first."}
+    class _QueueWriter:
+        """File-like writer that streams lines into the queue in real time."""
+        def __init__(self, q: queue.Queue[str]):
+            self.q = q
+            self._buf = ''
 
-    # If exists and not forced, return exists
-    if client.collection_exists(coll) and not req.force:
-        info = client.get_collection(coll)
-        return {"status": "exists", "project": req.project, "points": info.points_count}
+        def write(self, s: str) -> None:
+            self._buf += s
+            if '\n' in self._buf:
+                parts = self._buf.split('\n')
+                for line in parts[:-1]:
+                    self.q.put(line)
+                self._buf = parts[-1]
 
-    # If forced and exists, delete first
-    if client.collection_exists(coll) and req.force:
-        client.delete_collection(coll)
+        def flush(self) -> None:
+            if self._buf:
+                self.q.put(self._buf)
+                self._buf = ''
 
-    # Change working directory to project_dir before indexing
-    os.chdir(req.project_dir)
-    # Build index
-    rd_build_index(client, req.project_dir, coll)
-    info = client.get_collection(coll)
-    return {"status": "success", "project": req.project, "points": info.points_count}
+    def worker():
+        try:
+            coll = get_coll_name(req.project)
+            url = os.getenv("QDRANT_URL", None)
+            key = os.getenv("QDRANT_KEY", None) or None
+            if url:
+                client = qc.QdrantClient(url=url, api_key=key)
+                q.put(f"Using remote Qdrant at {url}")
+            else:
+                client = qc.QdrantClient(path="rag_demo_qdrant")
+                q.put("Using local Qdrant at path rag_demo_qdrant")
+
+            # Check AST output
+            ast_out = Path(req.project_dir) / "ast_out"
+            if not ast_out.exists() or not any(ast_out.iterdir()):
+                q.put(f"{{\"status\":\"error\",\"message\":\"AST output not found, please build AST first.\"}}")
+                q.put(None)
+                return
+
+            # Skip existing if not forced
+            if client.collection_exists(coll) and not req.force:
+                info = client.get_collection(coll)
+                q.put(f"Collection {coll} exists with {info.points_count} points (skipped build)")
+                q.put(f"{{\"status\":\"exists\",\"project\":\"{req.project}\",\"points\":{info.points_count}}}")
+                q.put(None)
+                return
+
+            # Force rebuild: delete existing
+            if client.collection_exists(coll) and req.force:
+                client.delete_collection(coll)
+                q.put(f"Deleted existing collection {coll} (force rebuild)")
+
+            # Switch to project directory and build, streaming output
+            os.chdir(req.project_dir)
+            q.put("Starting build_index")
+            writer = _QueueWriter(q)
+            with contextlib.redirect_stdout(writer), contextlib.redirect_stderr(writer):
+                rd_build_index(client, req.project_dir, coll)
+            writer.flush()
+            q.put("Finished build_index")
+
+            # Final status
+            info = client.get_collection(coll)
+            points_count = info.points_count if info is not None else 0
+            if points_count == 0:
+                q.put(f"{{\"status\":\"error\",\"project\":\"{req.project}\",\"message\":\"RAG build failed, no points indexed\"}}")
+            else:
+                q.put(
+                    f"{{\"status\":\"success\",\"project\":\"{req.project}\",\"collection\":\"{coll}\",\"points\":{points_count},\"message\":\"RAG build finished successfully\"}}"
+                )
+        except Exception as e:
+            msg = str(e).replace('"', '\\"')
+            q.put(f"{{\"status\":\"error\",\"message\":\"Build exception: {msg}\"}}")
+        finally:
+            q.put(None)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    def event_stream():
+        while True:
+            item = q.get()
+            if item is None:
+                break
+            yield item + "\n"
+
+    return StreamingResponse(event_stream(), media_type="text/plain")

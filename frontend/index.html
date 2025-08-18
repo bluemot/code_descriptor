@@ -22,11 +22,14 @@
       <button id="uploadBtn">Upload</button>
     </div>
     <button id="runBtn" style="margin-top:8px;">Build AST</button>
+    <label style="margin-top:8px; margin-left:8px;">
+      <input type="checkbox" id="forceCheckbox"> Force rebuild
+    </label>
     <button id="buildRagBtn" style="margin-top:8px; margin-left:8px;">Build RAG</button>
     <div id="progressContainer" style="display:none; margin-top:8px;">
       <progress id="progressBar" value="0" max="100" style="width:100%;"></progress>
       <div id="progressText"></div>
-      <pre id="debugOutput" style="background:#f0f0f0; padding:8px; height:150px; overflow:auto; margin-top:4px;"></pre>
+      <pre id="debugOutput" style="background:#f0f0f0; padding:8px; height:450px; overflow:auto; margin-top:4px;"></pre>
     </div>
     <hr>
     <h1>Chat</h1>

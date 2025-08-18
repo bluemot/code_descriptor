@@ -42,6 +42,8 @@ uvicorn backend.main:app --reload --port 8000
 
 Open `frontend/index.html` in your browser. Use the interface to upload a code directory and ask questions.
 
+You can check the **Force rebuild** checkbox to force re-indexing even if an existing RAG index already exists.
+
 ## API Endpoints
 
 - `POST /upload`: Upload multiple files (form field `files`) to generate AST and build the index.

@@ -12,8 +12,9 @@ RAG DEMO ✦ v6.1  (2025‑06‑02)
   pip install sentence_transformers scikit-learn qdrant_client langchain_openai tqdm gzip
 """
 from __future__ import annotations
-import argparse, pathlib, json, os, sys, itertools, warnings
+import argparse, pathlib, json, os, sys, itertools, warnings, time
 from collections import defaultdict
+from hashlib import blake2b
 from typing import List, Dict, Tuple
 
 import numpy as np
@@ -83,7 +84,60 @@ def get_embedder():
     print(f"[info] Using SentenceTransformer model={EMBED_MODEL} device={device}")
     return SentenceTransformer(EMBED_MODEL, device=device)
 
+# Embedding entry point
 EMBEDDER = get_embedder()
+
+# batching knobs (env-overridable)
+EMBED_BATCH = int(os.getenv("EMBED_BATCH", "64"))              # texts per embedding call
+QDRANT_UPSERT_CHUNK = int(os.getenv("QDRANT_UPSERT_CHUNK", "256"))  # points per upsert request
+FILE_SUM_SNIPPETS = int(os.getenv("FILE_SUM_SNIPPETS", "12"))  # snippets per file summary
+INDEX_STATE_DIR = os.getenv("INDEX_STATE_DIR", ".rag_state")   # local checkpoint directory
+RESUME = int(os.getenv("RESUME", "1"))                         # 1=resume from checkpoints
+
+print(f"[config] EMBED_BATCH={EMBED_BATCH}, QDRANT_UPSERT_CHUNK={QDRANT_UPSERT_CHUNK}, FILE_SUM_SNIPPETS={FILE_SUM_SNIPPETS}")
+print(f"[config] RESUME={RESUME}, INDEX_STATE_DIR='{INDEX_STATE_DIR}'")
+
+# ──────────────────── Checkpoint utilities ────────────────────
+def _safe_mkdir(p: pathlib.Path):
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+def _state_key_for_file(ast_path: pathlib.Path) -> str:
+    from hashlib import blake2b
+    return blake2b(str(ast_path).encode("utf-8"), digest_size=8).hexdigest()
+
+def _state_path(ast_path: pathlib.Path) -> pathlib.Path:
+    return pathlib.Path(INDEX_STATE_DIR) / f"{_state_key_for_file(ast_path)}.json"
+
+def _done_path(ast_path: pathlib.Path) -> pathlib.Path:
+    return pathlib.Path(INDEX_STATE_DIR) / f"{_state_key_for_file(ast_path)}.done"
+
+def _load_checkpoint(ast_path: pathlib.Path) -> Dict:
+    sp = _state_path(ast_path)
+    if sp.exists():
+        try:
+            return json.loads(sp.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+def _save_checkpoint(ast_path: pathlib.Path, data: Dict):
+    _safe_mkdir(pathlib.Path(INDEX_STATE_DIR))
+    sp = _state_path(ast_path)
+    data = dict(data)
+    data["ast_path"] = str(ast_path)
+    data["ts"] = time.time()
+    sp.write_text(json.dumps(data, ensure_ascii=False, indent=0), encoding="utf-8")
+
+def _mark_done(ast_path: pathlib.Path):
+    _safe_mkdir(pathlib.Path(INDEX_STATE_DIR))
+    _state_path(ast_path).unlink(missing_ok=True)
+    _done_path(ast_path).write_text("done", encoding="utf-8")
+
+def _is_done(ast_path: pathlib.Path) -> bool:
+    return _done_path(ast_path).exists()
 
 # LLM (OpenAI 介面)
 def get_llm():
@@ -101,6 +155,69 @@ def get_llm():
 LLM_SUM = get_llm()
 
 warnings.filterwarnings("ignore", category=DeprecationWarning, message="`search` method")
+
+# ──────────────────── Qdrant 輔助 ─────────────────────────
+def _stable_id(s: str) -> int:
+    """Deterministic 64-bit integer ID from a string."""
+    return int.from_bytes(blake2b(s.encode("utf-8"), digest_size=8).digest(), "big")
+
+def _ensure_collection(cli: qc.QdrantClient, coll_name: str, dim: int):
+    from qdrant_client import models as qm
+    if not cli.collection_exists(coll_name):
+        cli.create_collection(
+            coll_name,
+            vectors_config=qm.VectorParams(size=int(dim), distance=qm.Distance.COSINE),
+        )
+
+def _upsert_docs(cli: qc.QdrantClient, coll_name: str, docs: list, *,
+                 start_chunk: int = 0,
+                 on_chunk_done=None):
+    """
+    Batched embed + upsert.
+    - start_chunk: resume index (0-based). Each chunk size is QDRANT_UPSERT_CHUNK.
+    - on_chunk_done: optional callback(idx, total_chunks) after each upsert returns.
+    """
+    total = len(docs)
+    num_chunks = (total + QDRANT_UPSERT_CHUNK - 1) // QDRANT_UPSERT_CHUNK
+    print(f"[upsert] preparing {total} docs (chunk={QDRANT_UPSERT_CHUNK}, embed_batch={EMBED_BATCH}, start_chunk={start_chunk}/{num_chunks})")
+    if start_chunk >= num_chunks:
+        return
+    # loop from start_chunk
+    for chunk_idx in range(start_chunk, num_chunks):
+        j = chunk_idx * QDRANT_UPSERT_CHUNK
+        sub_docs = docs[j:j+QDRANT_UPSERT_CHUNK]
+        t0 = time.time()
+        sub_vecs = EMBEDDER.encode(
+            [d["text"] for d in sub_docs],
+            convert_to_numpy=True,
+            batch_size=EMBED_BATCH,
+            show_progress_bar=False,
+        )
+        t1 = time.time()
+        points = []
+        for i, d in enumerate(sub_docs):
+            points.append(
+                qm.PointStruct(
+                    id=_stable_id(d["id"]),
+                    vector=sub_vecs[i].tolist(),
+                    payload={
+                        "text": d["text"],
+                        "original_id": d["id"],
+                        "scope": d.get("scope", "func"),
+                        "file": d.get("file"),
+                    },
+                )
+            )
+        print(f"[upsert] encoded {len(sub_docs)} in {t1 - t0:.1f}s; sending {len(points)} points to Qdrant… (chunk {chunk_idx+1}/{num_chunks})")
+        t2 = time.time()
+        cli.upsert(collection_name=coll_name, points=points, wait=False)
+        t3 = time.time()
+        print(f"[upsert] upsert returned in {t3 - t2:.2f}s")
+        if on_chunk_done:
+            try:
+                on_chunk_done(chunk_idx, num_chunks)
+            except Exception as e:
+                print(f"[warn] on_chunk_done callback failed: {e}")
 
 def get_coll_name(ast_dir: str) -> str:
     """
@@ -163,10 +280,19 @@ def build_index(qc_cli: qc.QdrantClient, ast_dir: str, coll_name: str):
     if not ast_files:
         sys.exit("✗ 找不到 AST 檔")
 
-    docs: List[Dict] = []
+    print(f"[build] Found {len(ast_files)} AST file(s) in {ast_dir}")
     per_file: Dict[str, List[str]] = defaultdict(list)
 
-    for ast_path in tqdm(ast_files, desc="AST"):
+    # Ensure collection exists with the correct dimension
+    vector_size = EMBEDDER.get_sentence_embedding_dimension()
+    _ensure_collection(qc_cli, coll_name, vector_size)
+
+    for idx, ast_path in enumerate(ast_files, 1):
+        print(f"[build] Processing AST file {idx}/{len(ast_files)}: {ast_path}")
+        # Resume: skip finished files entirely
+        if RESUME and _is_done(ast_path):
+            print(f"[build] Skipping (done): {ast_path}")
+            continue
         # Determine the base name for the source file
         # Example: file.c.ast.json.gz -> file.c
         # Example: path__to__file.c.ast.json.gz -> path__to__file.c
@@ -281,110 +407,129 @@ def build_index(qc_cli: qc.QdrantClient, ast_dir: str, coll_name: str):
 
         src_lines = src_code.read_text(errors="ignore").splitlines()
         func_snips: List[str] = []
+        docs_batch: List[Dict] = []
         for name, b, e, snippet in stream_functions(ast_path, src_lines):
-            # ID includes original source suffix, e.g. path__to__file.c::my_function
-            docs.append({"id": f"{prefix}::{name}", "text": snippet})
+            # per-function point
+            docs_batch.append({"id": f"{prefix}::{name}", "text": snippet, "scope": "func", "file": prefix})
             func_snips.append(snippet)
             per_file[prefix].append(snippet)
 
-        # 檔案級摘要
+        # 檔案級摘要（有內容才做）
         if func_snips:
+            print(f"[build] Summarizing file-level snippets for {prefix} ({len(func_snips)} items)")
             file_sum = summarize(func_snips)
-            # ID for file summary, e.g. path__to__file.c::__file_summary__
-            docs.append({"id": f"{prefix}::__file_summary__", "text": file_sum})
+            print(f"[build] Generated file summary for {prefix}")
+            docs_batch.append({"id": f"{prefix}::__file_summary__", "text": file_sum, "scope": "file", "file": prefix})
             per_file[prefix].append(file_sum)
 
-    if not docs:
+        # ⬅️ 立刻上傳本檔案的 points（支援中斷續跑）
+        if docs_batch:
+            print(f"[build] Upserting {len(docs_batch)} point(s) for {prefix} (batch embed {EMBED_BATCH}, upsert chunk {QDRANT_UPSERT_CHUNK})")
+            # load checkpoint for this file
+            start_chunk = 0
+            if RESUME:
+                ckpt = _load_checkpoint(ast_path)
+                start_chunk = int(ckpt.get("completed_chunks", 0))
+                if start_chunk:
+                    print(f"[build] Resuming {ast_path} from chunk {start_chunk}")
+            def _on_done(chunk_idx, total_chunks):
+                # mark completed_chunks as chunk_idx+1
+                _save_checkpoint(ast_path, {
+                    "completed_chunks": int(chunk_idx + 1),
+                    "total_chunks": int(total_chunks),
+                    "qdrant_chunk": int(QDRANT_UPSERT_CHUNK),
+                })
+            _upsert_docs(qc_cli, coll_name, docs_batch, start_chunk=start_chunk, on_chunk_done=_on_done)
+            # if finished all chunks, mark done
+            fin = _load_checkpoint(ast_path)
+            if int(fin.get("completed_chunks", 0)) >= ((len(docs_batch) + QDRANT_UPSERT_CHUNK - 1)//QDRANT_UPSERT_CHUNK):
+                _mark_done(ast_path)
+                print(f"[build] Marked done: {ast_path}")
+
+    # 若整個專案沒有可索引片段，直接退出
+    if not per_file:
         sys.exit("✗ 沒抓到任何可索引的程式片段，請確認 AST 與原始碼路徑")
 
-    # 專案級摘要
+    # —— 最後：專案級摘要（全域視角） ——
+    print(f"[build] Summarizing project-level snippets from {len(per_file)} files")
     project_sum = summarize(list(itertools.chain.from_iterable(per_file.values())))
-    docs.append({"id": "__project_summary__", "text": project_sum})
-
-    vecs = EMBEDDER.encode([d["text"] for d in docs], batch_size=256,
-                            convert_to_numpy=True, show_progress_bar=True)
-    
-    vector_size = EMBEDDER.get_sentence_embedding_dimension()
-    if vecs.shape[1] != vector_size: # Should not happen with bge-large-zh-v1.5 (1024)
-        print(f"[warn] Vector dimension mismatch. Expected {vector_size}, got {vecs.shape[1]}. Will use {vecs.shape[1]}.")
-
-    # Create collection if it does not exist; otherwise upsert into existing collection
-    if not qc_cli.collection_exists(coll_name):
-        qc_cli.create_collection(
-            coll_name,
-            vectors_config=qm.VectorParams(size=int(vecs.shape[1]), distance=qm.Distance.COSINE),
-        )
-    else:
-        print(f"[info] Collection '{coll_name}' exists, upserting new vectors.")
-    
-    # Generate integer IDs for Qdrant if not using UUIDs or specific string IDs
-    # Qdrant SDK can take integer IDs directly.
-    # The 'id' field in 'docs' is for human readability/debugging, Qdrant gets integer IDs here.
-    qdrant_ids = list(range(len(docs)))
-    
-    # Prepare payloads. Qdrant payload should not contain the 'id' we made for docs.
-    # It will store the text and any other metadata we want to retrieve.
-    payloads = [{"text": d["text"], "original_id": d["id"]} for d in docs]
-
-
-    qc_cli.upload_collection(
-        coll_name,
-        vectors=vecs,
-        payload=payloads,
-        ids=qdrant_ids,
-        batch_size=256,
-    )
-    print(f"[build] 完成，共 {len(docs)} 向量")
+    print(f"[build] Generated project summary, upserting...")
+    proj_doc = [{"id": "__project_summary__", "text": project_sum, "scope": "project", "file": None}]
+    _upsert_docs(qc_cli, coll_name, proj_doc)
+    print(f"[build] Incremental upload done + project summary uploaded.")
 
 # ──────────────────── 檢索 ───────────────────────────────
 
 def search(client: qc.QdrantClient, coll_name: str, q: str, k: int = 40) -> List[str]:
+    # 1) Embed query for local re-ranking
     q_vec = EMBEDDER.encode(q, convert_to_numpy=True)
-    # Ensure q_vec is 1D for Qdrant client if it's not already
-    query_vector = q_vec.tolist()
-    if isinstance(query_vector[0], list): # if encode returns a list of lists for single query
-        query_vector = query_vector[0]
+    if isinstance(q_vec, list):
+        q_vec = np.array(q_vec)
+    if q_vec.ndim == 1:
+        qv = q_vec.reshape(1, -1)
+        q_for_qdrant = q_vec.tolist()
+    else:
+        qv = q_vec
+        q_for_qdrant = q_vec.tolist()
 
-    hits = client.search(collection_name=coll_name, query_vector=query_vector, limit=k, with_payload=True)
+    # 2) Initial semantic search from Qdrant (with payloads and scores)
+    hits = client.search(
+        collection_name=coll_name,
+        query_vector=q_for_qdrant,
+        limit=k,
+        with_payload=True,
+    )
     if not hits:
         return []
-    
-    texts = []
-    seen_texts = set() # Avoid duplicates from Qdrant if any (should not happen with distinct payloads)
+
+    # Collect candidates with text, scope, base score
+    items = []
+    seen_texts = set()
     for h in hits:
-        if h.payload and "text" in h.payload:
-            if h.payload["text"] not in seen_texts:
-                texts.append(h.payload["text"])
-                seen_texts.add(h.payload["text"])
-        else:
-            print(f"[warn] Hit with no payload or no text: {h.id}")
+        if not h.payload or "text" not in h.payload:
+            print(f"[warn] Hit with no payload or no text: {getattr(h, 'id', None)}")
+            continue
+        tx = h.payload["text"]
+        if tx in seen_texts:
+            continue
+        seen_texts.add(tx)
+        scope = h.payload.get("scope", "func")
+        base = float(getattr(h, "score", 0.0) or 0.0)
+        items.append({"text": tx, "scope": scope, "base": base})
 
-
-    if not texts:
+    if not items:
         return []
 
-    # TF-IDF Re-ranking (original logic)
-    # To re-rank, we need to re-encode the retrieved texts if we want semantic similarity for re-ranking
-    # Or use TF-IDF as originally intended.
-    # The original code re-encodes texts and uses cosine_similarity.
-    
-    # Option 1: Re-rank based on cosine similarity with the query_vector (already done by Qdrant)
-    # The hits are already sorted by similarity by Qdrant.
-    # The original re-ranking step might be redundant or aiming for a different re-ranking logic.
-    # "sub_vecs = EMBEDDER.encode(texts, convert_to_numpy=True)"
-    # "scores = cosine_similarity(q_vec.reshape(1,-1), sub_vecs)[0]"
-    # This re-calculates scores for the texts Qdrant already found.
-    # If Qdrant's COSINE distance is used, this re-ranking should yield a similar order unless
-    # there are precision differences or if `texts` were manipulated.
-    # For simplicity, let's trust Qdrant's order for the top-k, then slice to 25.
-    # Or, implement the TF-IDF re-ranking as the comment suggested was the goal.
-    # The current code is doing semantic re-ranking, not TF-IDF.
-    
-    # Keeping the original re-ranking logic for now:
-    sub_vecs = EMBEDDER.encode(texts, convert_to_numpy=True) # Re-encode the K texts
-    scores = cosine_similarity(q_vec.reshape(1,-1), sub_vecs)[0]
-    order = scores.argsort()[::-1][:25] # Get top 25 from the K=40
-    
+    texts = [it["text"] for it in items]
+
+    # 3) Local re-encode for cosine similarity
+    sub_vecs = EMBEDDER.encode(texts, convert_to_numpy=True)
+    if isinstance(sub_vecs, list):
+        sub_vecs = np.array(sub_vecs)
+    if sub_vecs.ndim == 1:
+        sub_vecs = sub_vecs.reshape(1, -1)
+    sims = cosine_similarity(qv, sub_vecs)[0]
+
+    # 4) Normalize Qdrant scores to [0,1]
+    base_scores = np.array([it["base"] for it in items], dtype=float)
+    if np.ptp(base_scores) > 0:
+        base_norm = (base_scores - base_scores.min()) / base_scores.ptp()
+    else:
+        base_norm = np.zeros_like(base_scores)
+
+    # 5) Scope bonus
+    def bonus(scope: str) -> float:
+        if scope == "project":
+            return 0.03
+        if scope == "file":
+            return 0.01
+        return 0.0
+    bonuses = np.array([bonus(it["scope"]) for it in items], dtype=float)
+
+    # 6) Final score and top-N
+    final = 0.8 * sims + 0.2 * base_norm + bonuses
+    top_n = min(25, len(items))
+    order = np.argsort(final)[::-1][:top_n]
     return [texts[i] for i in order]
 
 

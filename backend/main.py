@@ -21,6 +21,15 @@ from .build_ast import router as build_ast_router
 
 app = FastAPI()
 
+# Disable caching for app.js to force front-end reloads
+@app.middleware("http")
+async def no_cache_js(request, call_next):
+    response = await call_next(request)
+    # Avoid caching for JS static files (e.g. app.js)
+    if request.url.path.startswith("/static/") and request.url.path.endswith(".js"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
 # Serve frontend static files and index
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse

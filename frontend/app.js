@@ -84,7 +84,7 @@ runBtn.addEventListener('click', async () => {
     runBtn.disabled = false;
 });
 
-// Build RAG handler
+// Build RAG handler (stream logs)
 const buildRagBtn = document.getElementById('buildRagBtn');
 buildRagBtn.addEventListener('click', async () => {
     const project = document.getElementById('projectNameInput').value.trim();
@@ -92,28 +92,79 @@ buildRagBtn.addEventListener('click', async () => {
     const projectDir = projectDirInput.value.trim();
     if (!projectDir) { alert('Please enter a project directory.'); return; }
 
-    const payload = { project, project_dir: projectDir };
-    const doBuildRag = async (force = false) => {
-        const body = force ? { ...payload, force: true } : payload;
-        const res = await fetch('/build_rag', {
+    // Prepare UI for streaming logs
+    buildRagBtn.disabled = true;
+    debugOutput.textContent = '';
+    progressContainer.style.display = '';
+    progressBar.value = 0;
+    progressText.textContent = 'Starting RAG build...';
+
+    console.log('Build RAG clicked');
+    debugOutput.textContent += '>>> Build RAG clicked\n';
+    debugOutput.textContent += '>>> Build RAG: sending request to /build_rag\n';
+    const force = document.getElementById('forceCheckbox').checked;
+    let res;
+    try {
+        res = await fetch('/build_rag', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
+            body: JSON.stringify({ project, project_dir: projectDir, force }),
         });
-        const data = await res.json();
-        if (data.status === 'error') {
-            alert('AST output not found, please build AST first.');
-        } else if (data.status === 'exists' && !force) {
-            if (confirm('Project already exists, rebuild?')) {
-                return await doBuildRag(true);
+        debugOutput.textContent += `>>> Build RAG: response status ${res.status}\n`;
+    } catch (err) {
+        debugOutput.textContent += `>>> Build RAG: fetch error ${err}\n`;
+        buildRagBtn.disabled = false;
+        return;
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let finalStatus = null;
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) {
+                debugOutput.textContent += '>>> Build RAG: stream closed\n';
+                break;
             }
-        } else if (data.status === 'success') {
-            alert(`RAG build succeeded, points=${data.points}`);
-        } else {
-            alert('Error: ' + JSON.stringify(data));
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split(/\r?\n/);
+            buffer = lines.pop();
+            for (let line of lines) {
+                debugOutput.textContent += line + '\n';
+                // detect final JSON status
+                if (line.startsWith('{') && line.endsWith('}')) {
+                    try {
+                        finalStatus = JSON.parse(line);
+                        debugOutput.textContent += '>>> Build RAG: parsed finalStatus ' + JSON.stringify(finalStatus) + '\n';
+                    } catch (e) {
+                        debugOutput.textContent += '>>> Build RAG: finalStatus JSON parse error ' + e + '\n';
+                    }
+                }
+            }
         }
-    };
-    await doBuildRag();
+    } catch (err) {
+        debugOutput.textContent += `>>> Build RAG: stream read error ${err}\n`;
+    }
+    // finalize progress
+    progressBar.value = 100;
+    progressText.textContent = 'RAG build completed';
+    buildRagBtn.disabled = false;
+
+    // show alert based on final status
+    if (finalStatus) {
+        debugOutput.textContent += `>>> Build RAG: finalStatus.status=${finalStatus.status}\n`;
+        if (finalStatus.status === 'success') {
+            alert(`RAG build succeeded: project=${finalStatus.project}, points=${finalStatus.points}`);
+        } else if (finalStatus.status === 'exists') {
+            alert(`RAG exists: project=${finalStatus.project}, points=${finalStatus.points}`);
+        } else {
+            alert('RAG build error: ' + JSON.stringify(finalStatus));
+        }
+    } else {
+        debugOutput.textContent += '>>> Build RAG: no finalStatus received\n';
+        alert('RAG build completed with unknown status');
+    }
 });
 
 // Chat handler remains unchanged
