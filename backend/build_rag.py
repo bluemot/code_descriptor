@@ -39,6 +39,8 @@ async def build_rag(req: BuildRequest):
     if client.collection_exists(coll) and req.force:
         client.delete_collection(coll)
 
+    # Change working directory to project_dir before indexing
+    os.chdir(req.project_dir)
     # Build index
     rd_build_index(client, req.project_dir, coll)
     info = client.get_collection(coll)

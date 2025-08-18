@@ -38,34 +38,65 @@ LLM_BASE = os.getenv("LLM_BASE", None)
 LLM_MODEL = os.getenv("LLM_MODEL", None)
 
 # ──────────────────── 全域設定 ────────────────────────────
+# Embedding setup: choose between SentenceTransformer or OllamaEmbeddings based on environment
 EMBED_MODEL = os.getenv("EMBED_MODEL", "BAAI/bge-large-zh-v1.5")
-EMBEDDER    = SentenceTransformer(EMBED_MODEL, device="cuda" if torch.cuda.is_available() else "cpu")
+
+class EmbedderWrapper:
+    """Wrapper to unify interface between SentenceTransformer and OllamaEmbeddings"""
+    def __init__(self, embedder):
+        self._embedder = embedder
+
+    def encode(self, texts, batch_size=None, convert_to_numpy=False, show_progress_bar=False):
+        # texts: list[str] for documents or single str for query
+        if isinstance(texts, list):
+            vectors = self._embedder.embed_documents(texts)
+            arr = np.array(vectors)
+            return arr if convert_to_numpy else vectors
+        # single text query
+        vector = self._embedder.embed_query(texts)
+        arr = np.array(vector)
+        return arr if convert_to_numpy else vector
+
+    def get_sentence_embedding_dimension(self):
+        try:
+            return self._embedder.get_sentence_embedding_dimension()
+        except AttributeError:
+            vec = self._embedder.embed_query("")
+            return len(vec)
+
+def get_embedder():
+    # Prefer OllamaEmbeddings if configured, else use SentenceTransformer
+    if OLLAMA_HOST and EMBED_MODEL:
+        try:
+            from langchain_ollama import OllamaEmbeddings
+        except ImportError:
+            sys.exit(
+                "✗ langchain_ollama installed but OllamaEmbeddings class not found, please upgrade/downgrade package"
+            )
+
+        embed = OllamaEmbeddings(model=EMBED_MODEL, base_url=OLLAMA_HOST)
+        print(f"[info] Using OllamaEmbeddings model={EMBED_MODEL} host={OLLAMA_HOST}")
+        return EmbedderWrapper(embed)
+
+    # Fallback to SentenceTransformer
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"[info] Using SentenceTransformer model={EMBED_MODEL} device={device}")
+    return SentenceTransformer(EMBED_MODEL, device=device)
+
+EMBEDDER = get_embedder()
 
 # LLM (OpenAI 介面)
 def get_llm():
-    """
-    Initialize LLM client: Ollama if configured, else OpenAI-compatible.
-    """
     if OLLAMA_HOST and OLLAMA_MODEL:
         try:
-            from langchain_ollama import Ollama
+            from langchain_ollama import OllamaLLM
         except ImportError:
-            sys.exit("✗ langchain_ollama not installed for Ollama usage")
-        return Ollama(
+            sys.exit("✗ langchain_ollama installed but OllamaLLM class not found, please upgrade/downgrade package")
+
+        return OllamaLLM(
             model=OLLAMA_MODEL,
-            host=OLLAMA_HOST,
+            base_url=OLLAMA_HOST,
         )
-    if not (LLM_KEY and LLM_BASE and LLM_MODEL):
-        sys.exit("✗ 缺少 LLM_KEY/LLM_BASE/LLM_MODEL (請於 env.txt 中設定)")
-    return OpenAI(
-        openai_api_key=LLM_KEY,
-        openai_api_base=LLM_BASE,
-        model_name=LLM_MODEL,
-        max_tokens=512,
-        temperature=0.2,
-        timeout=60,
-        stop=["<END>", "Best regards"],
-    )
 
 LLM_SUM = get_llm()
 
