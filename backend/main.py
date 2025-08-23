@@ -21,6 +21,7 @@ from .build_ast import router as build_ast_router
 
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, PlainTextResponse
+from starlette.responses import Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
 
@@ -41,29 +42,54 @@ else:
     print("       Hints: (1) cd frontend && npm run build  → produces frontend/dist")
     print("              (2) or export FRONTEND_DIR=/absolute/path/to/your/build")
 
-class NoCacheJS(BaseHTTPMiddleware):
+class CacheControlForSpa(BaseHTTPMiddleware):
+    """
+    Best-practice SPA caching:
+    - index.html:      no-cache (so clients pick up new hashed assets)
+    - /assets/* files: long cache with immutable (hashed filenames)
+    Legacy:
+    - /static/* also long cache (temporary compatibility; prefer removing /static usage).
+    """
+    ASSET_SUFFIXES = (".js", ".css", ".map", ".woff2", ".woff", ".ttf", ".eot",
+                      ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp")
+
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
-        # Disable caching for common static artifacts
-        p = request.url.path.lower()
-        if p.endswith((".js", ".css", ".map")):
+        p = request.url.path
+        pl = p.lower()
+        # index.html (root or explicit)
+        if p == "/" or pl.endswith("/index.html"):
             response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
             response.headers["Pragma"] = "no-cache"
             response.headers["Expires"] = "0"
+            return response
+        # Vite assets (hashed)
+        if pl.startswith("/assets/") and pl.endswith(self.ASSET_SUFFIXES):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            return response
+        # Temporary legacy: /static/* assets
+        if pl.startswith("/static/") and pl.endswith(self.ASSET_SUFFIXES):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            return response
         return response
 
-app.add_middleware(NoCacheJS)
+app.add_middleware(CacheControlForSpa)
 
 # Mount SPA static dir when available (html=True enables index fallback for static handler)
 if FRONTEND_DIR.exists():
+    # Mount SPA static dir when available (html=True enables index fallback for static handler)
     app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="spa")
+    # Temporary legacy compatibility for older /static/* references.
+    # This points to the same dist directory; prefer migrating HTML to Vite-managed paths.
+    app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="legacy-static")
+    print("[warn] Mounted legacy /static → dist/. Update your HTML to rely on Vite output (e.g. /assets/*).")
 
 @app.get("/")
 async def serve_index():
     if INDEX_HTML.exists():
         return FileResponse(str(INDEX_HTML))
     return PlainTextResponse(
-        "frontend build not found. Please run `npm run build` in ./frontend or set FRONTEND_DIR.",
+        "frontend build not found. Run `npm run build` in ./frontend or set FRONTEND_DIR.",
         status_code=500,
     )
 
@@ -152,12 +178,18 @@ app.include_router(build_rag_router)
 app.include_router(ask_rag_router)
 app.include_router(build_ast_router)
 
-# Catch-all fallback for SPA client-side routes
+
 @app.get("/{full_path:path}")
 async def spa_fallback(full_path: str):
     if INDEX_HTML.exists():
         return FileResponse(str(INDEX_HTML))
     return PlainTextResponse(
-        "frontend build not found. Please run `npm run build` in ./frontend or set FRONTEND_DIR.",
+        "frontend build not found. Run `npm run build` in ./frontend or set FRONTEND_DIR.",
         status_code=500,
     )
+
+# Silence Chrome DevTools /.well-known probe to avoid noisy 404 logs.
+@app.get("/.well-known/{path:path}")
+async def well_known_probe(path: str):
+    # Respond No Content; adjust if you need to serve a real JSON later.
+    return Response(status_code=204)
