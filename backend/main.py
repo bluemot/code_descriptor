@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from .config import load_env  # noqa: E402
 load_env()
 import tempfile
+import os
 from pathlib import Path
 from .ast_gen import run_ast_generation
 from .rag_service import build_index, answer_question
@@ -18,33 +19,53 @@ from .build_rag import router as build_rag_router
 from .ask_rag import router as ask_rag_router
 from .build_ast import router as build_ast_router
 
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, PlainTextResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+
 
 app = FastAPI()
 
-# Disable caching for app.js to force front-end reloads
-@app.middleware("http")
-async def no_cache_js(request, call_next):
-    response = await call_next(request)
-    # Avoid caching for JS static files (e.g. app.js)
-    if request.url.path.startswith("/static/") and request.url.path.endswith(".js"):
-        response.headers["Cache-Control"] = "no-store"
-    return response
+# ───────────────── Frontend path detection ─────────────────
+# Default to <repo_root>/frontend/dist (Vite/most setups). Allow override via FRONTEND_DIR.
+# We resolve relative to this file so it doesn't depend on current working dir.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+_frontend_env = os.getenv("FRONTEND_DIR", "")
+FRONTEND_DIR = Path(_frontend_env).resolve() if _frontend_env else (REPO_ROOT / "frontend" / "dist")
+INDEX_HTML = FRONTEND_DIR / "index.html"
 
-# Serve frontend static files and index
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, StreamingResponse
-import threading
-import queue
-import json
+if INDEX_HTML.exists():
+    print(f"[info] Serving SPA from: {FRONTEND_DIR}")
+else:
+    print(f"[warn] index.html not found at: {INDEX_HTML}")
+    print("       Hints: (1) cd frontend && npm run build  → produces frontend/dist")
+    print("              (2) or export FRONTEND_DIR=/absolute/path/to/your/build")
 
-# Mount the frontend directory for static assets
-app.mount("/static", StaticFiles(directory="frontend"), name="static")
+class NoCacheJS(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        # Disable caching for common static artifacts
+        p = request.url.path.lower()
+        if p.endswith((".js", ".css", ".map")):
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
 
+app.add_middleware(NoCacheJS)
+
+# Mount SPA static dir when available (html=True enables index fallback for static handler)
+if FRONTEND_DIR.exists():
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="spa")
 
 @app.get("/")
 async def serve_index():
-    """Serve the SPA entry point."""
-    return FileResponse('frontend/index.html')
+    if INDEX_HTML.exists():
+        return FileResponse(str(INDEX_HTML))
+    return PlainTextResponse(
+        "frontend build not found. Please run `npm run build` in ./frontend or set FRONTEND_DIR.",
+        status_code=500,
+    )
 
 # Allow CORS for all origins (for front-end usage)
 app.add_middleware(
@@ -130,3 +151,13 @@ async def ask(q: Question):
 app.include_router(build_rag_router)
 app.include_router(ask_rag_router)
 app.include_router(build_ast_router)
+
+# Catch-all fallback for SPA client-side routes
+@app.get("/{full_path:path}")
+async def spa_fallback(full_path: str):
+    if INDEX_HTML.exists():
+        return FileResponse(str(INDEX_HTML))
+    return PlainTextResponse(
+        "frontend build not found. Please run `npm run build` in ./frontend or set FRONTEND_DIR.",
+        status_code=500,
+    )
