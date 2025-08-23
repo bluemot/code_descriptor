@@ -6,6 +6,11 @@
     <title>Code Upload & Chat</title>
 </head>
 <body>
+    <!-- Vite-managed header for quick styling check -->
+    <div id="app">
+      <h1>code_descriptor</h1>
+      <p class="muted">frontend ready (vanilla Vite)</p>
+    </div>
     <h1>Upload / Build AST / Build RAG</h1>
     <div>
       <label>Project Name: <input type="text" id="projectNameInput" placeholder="project name"></label>
@@ -39,6 +44,8 @@
     <input type="text" id="questionInput" placeholder="Ask a question"> <button id="askBtn">Ask</button>
     <pre id="chatOutput"></pre>
 
-    <script src="/static/app.js"></script>
+    <!-- Load Vite assets (CSS + JS) -->
+    <!-- Vite will rewrite to /assets/*.js and CSS in dist/index.html -->
+    <script type="module" src="/src/main.js"></script>
 </body>
 </html>
