@@ -76,13 +76,6 @@ class CacheControlForSpa(BaseHTTPMiddleware):
 app.add_middleware(CacheControlForSpa)
 
 # Mount SPA static dir when available (html=True enables index fallback for static handler)
-if FRONTEND_DIR.exists():
-    # Mount SPA static dir when available (html=True enables index fallback for static handler)
-    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="spa")
-    # Temporary legacy compatibility for older /static/* references.
-    # This points to the same dist directory; prefer migrating HTML to Vite-managed paths.
-    app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="legacy-static")
-    print("[warn] Mounted legacy /static → dist/. Update your HTML to rely on Vite output (e.g. /assets/*).")
 
 @app.get("/")
 async def serve_index():
@@ -177,6 +170,14 @@ async def ask(q: Question):
 app.include_router(build_rag_router)
 app.include_router(ask_rag_router)
 app.include_router(build_ast_router)
+
+# Mount SPA static dir when available (html=True enables index fallback for static handler)
+if FRONTEND_DIR.exists():
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="spa")
+    # Temporary legacy compatibility for older /static/* references.
+    # This points to the same dist directory; prefer migrating HTML to Vite-managed paths.
+    app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="legacy-static")
+    print("[warn] Mounted legacy /static → dist/. Update your HTML to rely on Vite output (e.g. /assets/*).")
 
 
 @app.get("/{full_path:path}")

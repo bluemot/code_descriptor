@@ -32,3 +32,7 @@ body {
   color: var(--accent);
   text-decoration: none;
 }
+#debugOutput{
+	color: #000000;
+	background: #f0f0f0;
+}

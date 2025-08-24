@@ -49,11 +49,12 @@ async def build_rag(req: BuildRequest):
 
     def worker():
         try:
-            coll = get_coll_name(req.project)
+            #coll = get_coll_name(req.project)
+            coll = f"proj_ast_{req.project}"
             url = os.getenv("QDRANT_URL", None)
             key = os.getenv("QDRANT_KEY", None) or None
             if url:
-                client = qc.QdrantClient(url=url, api_key=key)
+                client = qc.QdrantClient(url=url, api_key=key, timeout=1200)
                 q.put(f"Using remote Qdrant at {url}")
             else:
                 client = qc.QdrantClient(path="rag_demo_qdrant")
@@ -74,10 +75,7 @@ async def build_rag(req: BuildRequest):
                 q.put(None)
                 return
 
-            # Force rebuild: delete existing
-            if client.collection_exists(coll) and req.force:
-                client.delete_collection(coll)
-                q.put(f"Deleted existing collection {coll} (force rebuild)")
+            # Creation and upsert are handled inside build_index (_ensure_collection)
 
             # Switch to project directory and build, streaming output
             os.chdir(req.project_dir)

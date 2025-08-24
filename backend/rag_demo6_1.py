@@ -162,12 +162,19 @@ def _stable_id(s: str) -> int:
     return int.from_bytes(blake2b(s.encode("utf-8"), digest_size=8).digest(), "big")
 
 def _ensure_collection(cli: qc.QdrantClient, coll_name: str, dim: int):
-    from qdrant_client import models as qm
     if not cli.collection_exists(coll_name):
-        cli.create_collection(
-            coll_name,
-            vectors_config=qm.VectorParams(size=int(dim), distance=qm.Distance.COSINE),
-        )
+        try:
+            cli.create_collection(
+                coll_name,
+                vectors_config=qm.VectorParams(size=int(dim), distance=qm.Distance.COSINE),
+            )
+        except Exception as e:
+            print(f"[warning] Could not create collection {coll_name}: {e}")
+            # double-check
+            if not cli.collection_exists(coll_name):
+                raise RuntimeError(f"Collection {coll_name} not usable, aborting.")
+    else:
+        print(f"[info] Collection {coll_name} already exists, will upsert data instead of creating.")
 
 def _upsert_docs(cli: qc.QdrantClient, coll_name: str, docs: list, *,
                  start_chunk: int = 0,

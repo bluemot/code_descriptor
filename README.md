@@ -18,7 +18,10 @@ generating ASTs, indexing via Qdrant, and answering questions via a Retrieval-Au
 
 2. **Run Qdrant via Docker**
    ```bash
-   docker run -d -p 6333:6333 qdrant/qdrant
+   docker volume create qdrant-storage
+   docker volume create qdrant-snapshots
+
+   docker run -d --name qdrant -p 6333:6333 -p 6334:6334 -v qdrant-storage:/qdrant/storage -v qdrant-snapshots:/qdrant/snapshots qdrant/qdrant:latest
    ```
 
 3. **建立範例設定檔**
@@ -32,10 +35,22 @@ generating ASTs, indexing via Qdrant, and answering questions via a Retrieval-Au
    ollama pull deepseek-coder:6.7b
    ```
 
+## Frontend Development (Vite)
+
+Before starting the backend server, you can run the frontend locally with Vite:
+
+```bash
+cd frontend
+npm install
+npm run dev
+npm run build
+```
+
 ## Running the Server
 
 ```bash
-uvicorn backend.main:app --reload --port 8000
+#uvicorn backend.main:app --reload --port 8000
+python3 scripts/run_server.py
 ```
 
 ## Frontend
