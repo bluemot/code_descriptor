@@ -14,6 +14,31 @@ const progressBar = document.getElementById('progressBar');
 const progressText = document.getElementById('progressText');
 const debugOutput = document.getElementById('debugOutput');
 
+// Log appending with max lines and auto-scroll
+const LOG_MAX_LINES = import.meta.env.VITE_LOG_MAX_LINES
+  ? parseInt(import.meta.env.VITE_LOG_MAX_LINES, 10)
+  : 5000;
+
+function appendLog(line) {
+  if (!debugOutput) return;
+  const div = document.createElement('div');
+  div.textContent = line;
+  debugOutput.appendChild(div);
+  while (debugOutput.childNodes.length > LOG_MAX_LINES) {
+    debugOutput.removeChild(debugOutput.firstChild);
+  }
+  debugOutput.scrollTop = debugOutput.scrollHeight;
+}
+
+function appendLogs(lines) {
+  lines.forEach(appendLog);
+}
+
+function clearLogs() {
+  if (!debugOutput) return;
+  debugOutput.innerHTML = '';
+}
+
 // Mode switch: dir vs upload
 document.querySelectorAll('input[name="mode"]').forEach(radio => {
   radio.addEventListener('change', () => {
@@ -57,7 +82,7 @@ if (runBtn) {
     if (!projectDir) { alert('Please enter a project directory.'); return; }
 
     runBtn.disabled = true;
-    if (debugOutput) debugOutput.textContent = '';
+    clearLogs();
     if (progressContainer) progressContainer.style.display = '';
     if (progressBar) progressBar.value = 0;
     if (progressText) progressText.textContent = '';
@@ -77,7 +102,7 @@ if (runBtn) {
       const lines = buffer.split(/\r?\n/);
       buffer = lines.pop();
       for (let line of lines) {
-        if (debugOutput) debugOutput.textContent += line + '\n';
+        appendLog(line);
         const m = /Processing file\s*(\d+)\/(\d+)/.exec(line);
         if (m && progressBar && progressText) {
           const current = +m[1], total = +m[2];
@@ -103,27 +128,25 @@ if (buildRagBtn) {
     if (!projectDir) { alert('Please enter a project directory.'); return; }
 
     buildRagBtn.disabled = true;
-    if (debugOutput) debugOutput.textContent = '';
+    clearLogs();
     if (progressContainer) progressContainer.style.display = '';
     if (progressBar) progressBar.value = 0;
     if (progressText) progressText.textContent = 'Starting RAG build...';
 
     console.log('Build RAG clicked');
-    if (debugOutput) {
-      debugOutput.textContent += '>>> Build RAG clicked\n';
-      debugOutput.textContent += '>>> Build RAG: sending POST request to /build_rag\n';
-    }
+    appendLog('>>> Build RAG clicked');
+    appendLog('>>> Build RAG: sending POST request to /build_rag');
     const force = document.getElementById('forceCheckbox').checked;
     let res;
     try {
-      res = await fetch('/build_rag', {
+    res = await fetch('/build_rag', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ project, project_dir: projectDir, force }),
       });
-      if (debugOutput) debugOutput.textContent += `>>> Build RAG: response status ${res.status}\n`;
+      appendLog(`>>> Build RAG: response status ${res.status}`);
     } catch (err) {
-      if (debugOutput) debugOutput.textContent += `>>> Build RAG: fetch error ${err}\n`;
+      appendLog(`>>> Build RAG: fetch error ${err}`);
       buildRagBtn.disabled = false;
       return;
     }
@@ -135,33 +158,33 @@ if (buildRagBtn) {
       while (true) {
         const { done, value } = await reader.read();
         if (done) {
-          if (debugOutput) debugOutput.textContent += '>>> Build RAG: stream closed\n';
+          appendLog('>>> Build RAG: stream closed');
           break;
         }
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split(/\r?\n/);
         buffer = lines.pop();
         for (let line of lines) {
-          if (debugOutput) debugOutput.textContent += line + '\n';
+          appendLog(line);
           if (line.startsWith('{') && line.endsWith('}')) {
             try {
               finalStatus = JSON.parse(line);
-              if (debugOutput) debugOutput.textContent += '>>> Build RAG: parsed finalStatus ' + JSON.stringify(finalStatus) + '\n';
+              appendLog('>>> Build RAG: parsed finalStatus ' + JSON.stringify(finalStatus));
             } catch (e) {
-              if (debugOutput) debugOutput.textContent += '>>> Build RAG: finalStatus JSON parse error ' + e + '\n';
+              appendLog('>>> Build RAG: finalStatus JSON parse error ' + e);
             }
           }
         }
       }
     } catch (err) {
-      if (debugOutput) debugOutput.textContent += `>>> Build RAG: stream read error ${err}\n`;
+      appendLog(`>>> Build RAG: stream read error ${err}`);
     }
     if (progressBar) progressBar.value = 100;
     if (progressText) progressText.textContent = 'RAG build completed';
     buildRagBtn.disabled = false;
 
     if (finalStatus) {
-      if (debugOutput) debugOutput.textContent += `>>> Build RAG: finalStatus.status=${finalStatus.status}\n`;
+      appendLog(`>>> Build RAG: finalStatus.status=${finalStatus.status}`);
       if (finalStatus.status === 'success') {
         alert(`RAG build succeeded: project=${finalStatus.project}, points=${finalStatus.points}`);
       } else if (finalStatus.status === 'exists') {
@@ -170,7 +193,7 @@ if (buildRagBtn) {
         alert('RAG build error: ' + JSON.stringify(finalStatus));
       }
     } else {
-      if (debugOutput) debugOutput.textContent += '>>> Build RAG: no finalStatus received\n';
+      appendLog('>>> Build RAG: no finalStatus received');
       alert('RAG build completed with unknown status');
     }
   });
