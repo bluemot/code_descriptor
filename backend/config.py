@@ -16,7 +16,12 @@ def load_env():
             continue
         key, val = line.split("=", 1)
         key = key.strip()
-        val = val.strip().strip('"').strip("'")
+        val = val.strip()
+        # remove inline comments
+        if "#" in val:
+            val = val.split("#", 1)[0].strip()
+        # strip quotes
+        val = val.strip('"').strip("'")
         if key and val and key not in os.environ:
             os.environ[key] = val
 

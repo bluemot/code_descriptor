@@ -40,7 +40,8 @@ LLM_MODEL = os.getenv("LLM_MODEL", None)
 
 # ──────────────────── 全域設定 ────────────────────────────
 # Embedding setup: choose between SentenceTransformer or OllamaEmbeddings based on environment
-EMBED_MODEL = os.getenv("EMBED_MODEL", "BAAI/bge-large-zh-v1.5")
+# Default to a smaller model for faster embed speed, override via EMBED_MODEL env
+EMBED_MODEL = os.getenv("EMBED_MODEL", "bge-small-en-v1.5")
 
 class EmbedderWrapper:
     """Wrapper to unify interface between SentenceTransformer and OllamaEmbeddings"""
@@ -67,6 +68,10 @@ class EmbedderWrapper:
 
 def get_embedder():
     # Prefer OllamaEmbeddings if configured, else use SentenceTransformer
+    cuda = torch.cuda.is_available()
+    use_fp16 = cuda
+    device = "cuda" if cuda else "cpu"
+    # If Ollama is configured, prefer it; else use SentenceTransformer
     if OLLAMA_HOST and EMBED_MODEL:
         try:
             from langchain_ollama import OllamaEmbeddings
@@ -76,26 +81,33 @@ def get_embedder():
             )
 
         embed = OllamaEmbeddings(model=EMBED_MODEL, base_url=OLLAMA_HOST)
-        print(f"[info] Using OllamaEmbeddings model={EMBED_MODEL} host={OLLAMA_HOST}")
+        print(f"[info] EMBED_MODEL={EMBED_MODEL} via OllamaEmbeddings host={OLLAMA_HOST} device={device} batch={EMBED_BATCH} fp16={use_fp16}")
         return EmbedderWrapper(embed)
 
     # Fallback to SentenceTransformer
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"[info] Using SentenceTransformer model={EMBED_MODEL} device={device}")
-    return SentenceTransformer(EMBED_MODEL, device=device)
+    print(f"[info] EMBED_MODEL={EMBED_MODEL} via SentenceTransformer device={device} batch={EMBED_BATCH} fp16={use_fp16}")
+    model = SentenceTransformer(EMBED_MODEL, device=device)
+    if use_fp16:
+        model = model.half()
+    return model
+
+## performance knobs (env-overridable) must come before embedder init
+MAX_FUNC_LINES_BUILD = int(os.getenv('MAX_FUNC_LINES_BUILD', '80'))
+MAX_BYTES_PER_SNIPPET = int(os.getenv('MAX_BYTES_PER_SNIPPET', '4096'))
+MAX_POINTS_PER_FILE = int(os.getenv('MAX_POINTS_PER_FILE', '800'))
+print(f"[config] MAX_FUNC_LINES_BUILD={MAX_FUNC_LINES_BUILD}, MAX_BYTES_PER_SNIPPET={MAX_BYTES_PER_SNIPPET}, MAX_POINTS_PER_FILE={MAX_POINTS_PER_FILE}")
+EMBED_BATCH = int(os.getenv("EMBED_BATCH", "192"))              # texts per embedding call
+QDRANT_UPSERT_CHUNK = int(os.getenv("QDRANT_UPSERT_CHUNK", "1024"))  # points per upsert request
+FILE_SUM_SNIPPETS = int(os.getenv("FILE_SUM_SNIPPETS", "12"))  # snippets per file summary
+INDEX_STATE_DIR = os.getenv("INDEX_STATE_DIR", ".rag_state")   # local checkpoint directory
+RESUME = int(os.getenv("RESUME", "1"))                         # 1=resume from checkpoints
 
 # Embedding entry point
 EMBEDDER = get_embedder()
 
 # batching knobs (env-overridable)
-EMBED_BATCH = int(os.getenv("EMBED_BATCH", "64"))              # texts per embedding call
-QDRANT_UPSERT_CHUNK = int(os.getenv("QDRANT_UPSERT_CHUNK", "256"))  # points per upsert request
-FILE_SUM_SNIPPETS = int(os.getenv("FILE_SUM_SNIPPETS", "12"))  # snippets per file summary
-INDEX_STATE_DIR = os.getenv("INDEX_STATE_DIR", ".rag_state")   # local checkpoint directory
-RESUME = int(os.getenv("RESUME", "1"))                         # 1=resume from checkpoints
+# Increase batch size for throughput; fall back on OOM
 
-print(f"[config] EMBED_BATCH={EMBED_BATCH}, QDRANT_UPSERT_CHUNK={QDRANT_UPSERT_CHUNK}, FILE_SUM_SNIPPETS={FILE_SUM_SNIPPETS}")
-print(f"[config] RESUME={RESUME}, INDEX_STATE_DIR='{INDEX_STATE_DIR}'")
 
 # ──────────────────── Checkpoint utilities ────────────────────
 def _safe_mkdir(p: pathlib.Path):
@@ -253,6 +265,10 @@ def _open_stream(p: pathlib.Path):
 
 def stream_functions(ast_path: pathlib.Path, src_lines: List[str]):
     """Yield (name, begin, end, snippet) from a single AST."""
+    # performance tunables
+    _MAX_FUNC_LINES_BUILD = int(os.getenv('MAX_FUNC_LINES_BUILD', '80'))
+    _SKIP_TRIVIAL_FUNCS = int(os.getenv('SKIP_TRIVIAL_FUNCS', '1'))
+    _MAX_BYTES_PER_SNIPPET = int(os.getenv('MAX_BYTES_PER_SNIPPET', '4096'))
     with _open_stream(ast_path) as fp: # fp will be a binary stream
         data = json.load(fp) # json.load can handle a binary fp if it contains UTF-8 text
     stack = [data]
@@ -266,7 +282,13 @@ def stream_functions(ast_path: pathlib.Path, src_lines: List[str]):
             b = node["range"]["begin"].get("line", 1)
             e = node["range"]["end"].get("line", b)
             if 1 <= b <= len(src_lines):
-                snippet = "\n".join(src_lines[b-1 : min(e, b+400)])
+                length = e - b + 1
+                if _SKIP_TRIVIAL_FUNCS and length < 3:
+                    continue
+                end_line = min(e, b + _MAX_FUNC_LINES_BUILD)
+                snippet = "\n".join(src_lines[b-1:end_line])
+                if len(snippet.encode('utf-8')) > _MAX_BYTES_PER_SNIPPET:
+                    snippet = snippet.encode('utf-8')[:_MAX_BYTES_PER_SNIPPET].decode('utf-8', errors='ignore')
                 yield name, b, e, snippet
         stack.extend(node.get("inner", []))
 
@@ -431,6 +453,19 @@ def build_index(qc_cli: qc.QdrantClient, ast_dir: str, coll_name: str):
 
         # ⬅️ 立刻上傳本檔案的 points（支援中斷續跑）
         if docs_batch:
+            # enforce per-file point limit
+            if len(docs_batch) > MAX_POINTS_PER_FILE:
+                # sort by snippet length desc, then keyword priority
+                keywords = ["init", "encode", "decode", "probe", "aes", "ccm", "tx", "rx"]
+                def score_item(d):
+                    txt = d.get('text','')
+                    s = len(txt)
+                    for kw in keywords:
+                        if kw in txt.lower(): s += 10000
+                    return s
+
+                docs_batch.sort(key=score_item, reverse=True)
+                docs_batch = docs_batch[:MAX_POINTS_PER_FILE]
             print(f"[build] Upserting {len(docs_batch)} point(s) for {prefix} (batch embed {EMBED_BATCH}, upsert chunk {QDRANT_UPSERT_CHUNK})")
             # load checkpoint for this file
             start_chunk = 0
