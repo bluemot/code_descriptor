@@ -79,4 +79,11 @@ def bm25_recall(query: str, topk: int) -> List[Candidate]:
             score=score, source='bm25', text=snippet, meta={}
         ))
     print(f"[retrieve:bm25] returned={len(cands)} topk={topk}")
+    # 顯示 BM25 前幾筆命中，便於判斷是否都落在正確模組
+    try:
+        for i, c in enumerate(cands[:5]):
+            pv = (c.text or "")[:100].replace("\n", " ")
+            print(f"[bm25:top{i}] score={getattr(c,'score',0):.4f} file={getattr(c,'file','?')} preview={pv}")
+    except Exception:
+        pass
     return cands

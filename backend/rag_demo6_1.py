@@ -555,7 +555,8 @@ def search(client: qc.QdrantClient, coll_name: str, q: str, k: int = 40) -> List
     # 4) Normalize Qdrant scores to [0,1]
     base_scores = np.array([it["base"] for it in items], dtype=float)
     if np.ptp(base_scores) > 0:
-        base_norm = (base_scores - base_scores.min()) / base_scores.ptp()
+        # Normalize base scores; use np.ptp for peak-to-peak (NumPy 2.0 compatibility)
+        base_norm = (base_scores - base_scores.min()) / (np.ptp(base_scores) if hasattr(np, 'ptp') else base_scores.ptp())
     else:
         base_norm = np.zeros_like(base_scores)
 

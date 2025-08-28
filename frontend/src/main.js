@@ -199,28 +199,55 @@ if (buildRagBtn) {
   });
 }
 
+// Load projects & collections for ask_rag
+(async function loadSelectors() {
+  const psel = document.getElementById('projectSelect');
+  const csel = document.getElementById('collectionSelect');
+  if (!psel || !csel) return;
+  try {
+    const res = await fetch('/collections');
+    const data = await res.json();
+    if (data.status === 'success') {
+      data.projects.forEach(p => {
+        const o = document.createElement('option'); o.value = p; o.textContent = p;
+        psel.appendChild(o);
+      });
+      data.collections.forEach(c => {
+        const o = document.createElement('option'); o.value = c; o.textContent = c;
+        csel.appendChild(o);
+      });
+      psel.addEventListener('change', () => {
+        csel.value = data.mapping[psel.value] || '';
+      });
+      csel.addEventListener('change', () => {
+        const pr = Object.entries(data.mapping).find(([,v]) => v === csel.value);
+        psel.value = pr ? pr[0] : '';
+      });
+    }
+  } catch (e) { console.error('load selectors failed', e); }
+})();
+
 // Chat handler
 const askBtn = document.getElementById('askBtn');
 if (askBtn) {
   askBtn.addEventListener('click', async () => {
-    const project = document.getElementById('chatProjectInput').value.trim();
-    if (!project) { alert('Please enter a project name.'); return; }
+    const project = document.getElementById('projectSelect').value;
+    const collection = document.getElementById('collectionSelect').value;
     const question = document.getElementById('questionInput').value.trim();
+    if (!project && !collection) { alert('Select project or collection'); return; }
     if (!question) { alert('Please enter a question.'); return; }
+    askBtn.disabled = true;
     const res = await fetch('/ask_rag', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ project, question }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project, collection, question }),
     });
     const data = await res.json();
-    if (data.status === 'not_found') {
-      alert('Project not found, please build RAG first.');
-      return;
-    } else if (data.status === 'success') {
+    if (data.status === 'success') {
       const out = document.getElementById('chatOutput');
       if (out) out.textContent = data.answer;
     } else {
       alert('Error: ' + JSON.stringify(data));
     }
+    askBtn.disabled = false;
   });
 }

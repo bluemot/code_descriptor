@@ -6,43 +6,54 @@
     <title>Code Upload & Chat</title>
 </head>
 <body>
-    <!-- Vite-managed header for quick styling check -->
-    <div id="app">
-      <h1>code_descriptor</h1>
-      <p class="muted">frontend ready (vanilla Vite)</p>
-    </div>
-    <h1>Upload / Build AST / Build RAG</h1>
-    <div>
-      <label>Project Name: <input type="text" id="projectNameInput" placeholder="project name"></label>
-    </div>
-    <div>
-      <label><input type="radio" name="mode" value="dir" checked> Use existing server directory</label>
-      <label><input type="radio" name="mode" value="upload"> Upload local files</label>
-    </div>
-    <div id="dirSection">
-      <label>Project directory: <input type="text" id="projectDirInput" placeholder="/path/to/project"></label>
-    </div>
-    <div id="uploadSection" style="display:none; margin-top:8px;">
-      <input type="file" id="fileInput" webkitdirectory multiple>
-      <button id="uploadBtn">Upload</button>
-    </div>
-    <button id="runBtn" style="margin-top:8px;">Build AST</button>
-    <label style="margin-top:8px; margin-left:8px;">
-      <input type="checkbox" id="forceCheckbox"> Force rebuild
-    </label>
-    <button id="buildRagBtn" style="margin-top:8px; margin-left:8px;">Build RAG</button>
-    <div id="progressContainer" style=" margin-top:8px;">
-      <progress id="progressBar" value="0" max="100" style="width:100%;"></progress>
-      <div id="progressText"></div>
-      <pre id="debugOutput" style="background:#f1f1edec; color:#000000; padding:8px; height:450px; overflow:auto; margin-top:4px;"></pre>
-    </div>
-    <hr>
-    <h1>Chat</h1>
-    <div>
-      <label>Project Name: <input type="text" id="chatProjectInput" placeholder="project name"></label>
-    </div>
-    <input type="text" id="questionInput" placeholder="Ask a question"> <button id="askBtn">Ask</button>
-    <pre id="chatOutput"></pre>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    .container {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      grid-template-columns: 1fr 3fr;
+      height: 100vh;
+    }
+    .header { grid-column: 1 / span 2; padding: 12px 16px; border-bottom: 1px solid #ddd; }
+    .sidebar { grid-column: 1; overflow: auto; padding: 12px; border-right: 1px solid #ddd; }
+    .main { grid-column: 2; overflow: auto; padding: 12px 16px; }
+
+    #askPanel .selectors { display: flex; gap: 12px; align-items: center; margin-bottom: 8px; }
+    #askPanel label { display: inline-flex; gap: 8px; align-items: center; }
+    #questionInput { width: 100%; min-height: 150px; padding: 10px; }
+    #chatOutput {
+      width: 100%; min-height: 300px; overflow: auto;
+      font-family: monospace; white-space: pre-wrap; border: 1px solid #ccc;
+      padding: 10px; border-radius: 6px; background: #fafafa;
+    }
+    .actions { margin: 8px 0 16px; }
+  </style>
+  <div class="container">
+    <header class="header"><h1>Code Descriptor</h1></header>
+    <aside class="sidebar">
+      <section id="buildAstPanel"></section>
+      <section id="buildRagPanel"></section>
+    </aside>
+    <main class="main">
+      <section id="askPanel">
+        <div class="selectors">
+          <label>Project
+            <select id="projectSelect">
+              <option value="">Select a project</option>
+            </select>
+          </label>
+          <label>Collection
+            <select id="collectionSelect">
+              <option value="">Select a collection</option>
+            </select>
+          </label>
+        </div>
+        <textarea id="questionInput" placeholder="Ask a question…"></textarea>
+        <div class="actions"><button id="askBtn">Ask</button></div>
+        <pre id="chatOutput"></pre>
+      </section>
+    </main>
+  </div>
 
     <!-- Load Vite assets (CSS + JS) -->
     <!-- Vite will rewrite to /assets/*.js and CSS in dist/index.html -->
